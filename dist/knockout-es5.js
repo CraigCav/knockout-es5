@@ -304,6 +304,73 @@
     }
   }
 
+  // Custom two-way Binding Provider
+  // -------------------
+  //
+  // Custom bindings are often need to be provided with the observable rather than only the value
+  // of the property. This custom binding provider supplies bindings with actual observable values.
+  // The built in bindings use Knockout's internal `_ko_property_writers` feature to be able to
+  // write back to the property, but custom bindings may not be able to use `_ko_property_writers`
+  // unless it is exposed.
+
+  function TwoWayBindingProvider(providerToWrap) {
+    this.bindingCache = {};
+    this._providerToWrap = providerToWrap;
+    this._nativeBindingProvider = new ko.bindingProvider();
+  }
+
+  TwoWayBindingProvider.prototype.nodeHasBindings = function() {
+    return this._providerToWrap.nodeHasBindings.apply(this._providerToWrap, arguments);
+  };
+
+  TwoWayBindingProvider.prototype.getBindingAccessors = function(node, bindingContext) {
+    var s = this._nativeBindingProvider.getBindingsString(node, bindingContext);
+    return s ? this.parseBindingsString(s, bindingContext, node, {'valueAccessors':true}) : null;
+  };
+
+  TwoWayBindingProvider.prototype.parseBindingsString = function(bindingsString, bindingContext, node, options) {
+    try {
+      var bindingFunction = createBindingsStringEvaluatorViaCache(bindingsString, this.bindingCache, options);
+      return bindingFunction(bindingContext, node);
+    } catch (ex) {
+      ex.message = 'Unable to parse bindings.\nBindings value: ' + bindingsString + '\nMessage: ' + ex.message;
+      throw ex;
+    }
+  };
+
+  function preProcessBindings(bindingsStringOrKeyValueArray, bindingOptions) {
+    bindingOptions = bindingOptions || {};
+
+    function processKeyValue(key, val) {
+      resultStrings.push(key + ':ko.getObservable($data,"' + val + '")||' + val);
+    }
+
+    var resultStrings = [],
+        isString = typeof bindingsStringOrKeyValueArray === 'string',
+        parseObjectLiteral = ko.expressionRewriting.parseObjectLiteral,
+        keyValueArray = isString 
+          ? parseObjectLiteral(bindingsStringOrKeyValueArray)
+          : bindingsStringOrKeyValueArray;
+
+    keyValueArray.forEach(function(keyValue) {
+      processKeyValue(keyValue.key || keyValue.unknown, keyValue.value);
+    });
+
+    return ko.expressionRewriting.preProcessBindings(resultStrings.join(','), bindingOptions);
+  }
+
+  function createBindingsStringEvaluatorViaCache(bindingsString, cache, options) {
+    var cacheKey = bindingsString + (options && options.valueAccessors || '');
+    return cache[cacheKey] || (cache[cacheKey] = createBindingsStringEvaluator(bindingsString, options));
+  }
+
+  function createBindingsStringEvaluator(bindingsString, options) {
+    var rewrittenBindings = preProcessBindings(bindingsString, options),
+        functionBody = 'with($context){with($data||{}){return{' + rewrittenBindings + '}}}';
+     /* jshint -W054 */
+    return new Function('$context', '$element', functionBody);
+  }
+
   // Module initialisation
   // ---------------------
   //
@@ -323,6 +390,8 @@
     ko.getObservable = getObservable;
     ko.valueHasMutated = valueHasMutated;
     ko.defineProperty = defineComputedProperty;
+    ko.es5BindingProvider = TwoWayBindingProvider;
+    ko.bindingProvider.instance = new TwoWayBindingProvider(ko.bindingProvider.instance);
   }
 
   // Determines which module loading scenario we're in, grabs dependencies, and attaches to KO
